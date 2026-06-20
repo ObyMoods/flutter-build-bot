@@ -1,0 +1,134 @@
+name: Flutter Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL ZIP file dari GitHub Release'
+        required: true
+        type: string
+      tag:
+        description: 'Tag untuk identifikasi build'
+        required: true
+        type: string
+      build_type:
+        description: 'Tipe build (debug/release)'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+
+jobs:
+  build:
+    name: Build Flutter APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip curl wget
+
+      - name: Download and extract project
+        id: download
+        run: |
+          mkdir -p project
+          cd project
+          echo "Downloading ${{ inputs.zip_url }}"
+          curl -L -o project.zip "${{ inputs.zip_url }}"
+          unzip -q project.zip
+          rm project.zip
+          echo "Project extracted successfully"
+          ls -la
+
+      - name: Find project root
+        id: find_root
+        run: |
+          cd project
+          # Cari direktori yang memiliki pubspec.yaml
+          if [ -f "pubspec.yaml" ]; then
+            echo "project_root=." >> $GITHUB_OUTPUT
+          else
+            # Cari di subdirektori
+            ROOT=$(find . -maxdepth 3 -name "pubspec.yaml" -exec dirname {} \; | head -1)
+            if [ -z "$ROOT" ]; then
+              echo "ERROR: pubspec.yaml not found!"
+              exit 1
+            fi
+            echo "project_root=${ROOT#./}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get Flutter dependencies
+        run: |
+          cd project/${{ steps.find_root.outputs.project_root }}
+          flutter clean
+          flutter pub get
+          flutter pub run build_runner build --delete-conflicting-outputs || true
+
+      - name: Build APK
+        id: build
+        run: |
+          cd project/${{ steps.find_root.outputs.project_root }}
+          
+          if [ "${{ inputs.build_type }}" == "debug" ]; then
+            flutter build apk --debug
+          else
+            flutter build apk --release --split-per-abi
+          fi
+          
+          echo "Build completed"
+
+      - name: Collect APK files
+        id: collect
+        run: |
+          cd project/${{ steps.find_root.outputs.project_root }}
+          mkdir -p apk_output
+          
+          if [ "${{ inputs.build_type }}" == "debug" ]; then
+            # Debug build
+            if [ -f "build/app/outputs/flutter-apk/app-debug.apk" ]; then
+              cp "build/app/outputs/flutter-apk/app-debug.apk" "apk_output/app-debug.apk"
+            fi
+          else
+            # Release build - copy all APKs
+            if [ -d "build/app/outputs/apk/release" ]; then
+              find "build/app/outputs/apk/release" -name "*.apk" -exec cp {} "apk_output/" \;
+            fi
+          fi
+          
+          echo "APK files collected:"
+          ls -la apk_output/
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-apk-${{ inputs.tag }}
+          path: project/${{ steps.find_root.outputs.project_root }}/apk_output/
+          retention-days: 7
+          compression-level: 0
+
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tag** | ${{ inputs.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build Type** | ${{ inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Runner** | Ubuntu Latest |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
