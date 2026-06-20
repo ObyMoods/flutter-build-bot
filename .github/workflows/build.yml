@@ -3,16 +3,16 @@ name: Flutter Build APK
 on:
   workflow_dispatch:
     inputs:
-      zip_url:
-        description: 'URL ZIP file dari GitHub Release'
+      release_url:
+        description: 'URL Release dengan ZIP file'
         required: true
         type: string
       tag:
-        description: 'Tag untuk identifikasi build'
+        description: 'Tag build'
         required: true
         type: string
       build_type:
-        description: 'Tipe build (debug/release)'
+        description: 'Jenis build (debug/release)'
         required: true
         default: 'release'
         type: choice
@@ -27,206 +27,67 @@ jobs:
     timeout-minutes: 30
     
     steps:
+      # 1. Setup environment
       - name: Checkout repository
         uses: actions/checkout@v4
-
+      
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: 'zulu'
           java-version: '17'
-
+      
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.22.0'
           channel: 'stable'
           cache: true
-
-      - name: Install system dependencies
+      
+      # 2. Download ZIP dari Release
+      - name: Download source code ZIP
         run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip curl wget git
-
-      - name: Download and extract project
-        id: download
+          echo "📥 Downloading ZIP from: ${{ github.event.inputs.release_url }}"
+          curl -L -o project.zip "${{ github.event.inputs.release_url }}"
+          echo "✅ ZIP downloaded successfully"
+      
+      - name: Extract ZIP
         run: |
-          mkdir -p project
-          cd project
-          echo "📥 Downloading project from: ${{ inputs.zip_url }}"
-          curl -L -o project.zip "${{ inputs.zip_url }}"
-          
-          # Check if download succeeded
-          if [ ! -f "project.zip" ] || [ ! -s "project.zip" ]; then
-            echo "❌ Failed to download project ZIP!"
-            exit 1
-          fi
-          
-          echo "📦 Extracting project..."
-          unzip -q project.zip
-          rm project.zip
-          echo "✅ Project extracted successfully"
-          ls -la
-
-      - name: Find project root
-        id: find_root
-        run: |
-          cd project
-          
-          # Cari direktori yang memiliki pubspec.yaml
-          if [ -f "pubspec.yaml" ]; then
-            echo "✅ Found pubspec.yaml in root directory"
-            echo "project_root=." >> $GITHUB_OUTPUT
-          else
-            # Cari di subdirektori
-            ROOT=$(find . -maxdepth 3 -name "pubspec.yaml" -exec dirname {} \; | head -1)
-            if [ -z "$ROOT" ]; then
-              echo "❌ pubspec.yaml not found anywhere!"
-              echo "📁 Directory contents:"
-              find . -type f -name "*.yaml" -o -name "*.yml" | head -20
-              exit 1
-            fi
-            echo "✅ Found pubspec.yaml in: $ROOT"
-            echo "project_root=${ROOT#./}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Debug pubspec.yaml
-        run: |
-          cd project/${{ steps.find_root.outputs.project_root }}
-          echo "📄 Content of pubspec.yaml:"
-          cat pubspec.yaml
-          echo ""
-          echo "📁 Directory structure:"
-          ls -la
-
+          unzip -q project.zip -d project
+          echo "✅ ZIP extracted successfully"
+          ls -la project/
+      
+      # 3. Build APK
       - name: Get Flutter dependencies
-        id: deps
         run: |
-          cd project/${{ steps.find_root.outputs.project_root }}
-          echo "📦 Running flutter clean..."
-          flutter clean
-          
-          echo "📦 Running flutter pub get..."
-          flutter pub get || { 
-            echo "❌ flutter pub get failed!"
-            echo "🔍 Checking pubspec.yaml for errors..."
-            flutter pub get --verbose | tail -50
-            exit 1
-          }
-          
-          echo "📦 Running build_runner (optional)..."
-          flutter pub run build_runner build --delete-conflicting-outputs || true
-          
-          echo "✅ Dependencies installed successfully"
-
+          cd project
+          flutter pub get
+          echo "✅ Dependencies installed"
+      
       - name: Build APK
-        id: build
         run: |
-          cd project/${{ steps.find_root.outputs.project_root }}
-          
-          if [ "${{ inputs.build_type }}" == "debug" ]; then
-            echo "🔨 Building DEBUG APK..."
+          cd project
+          if [ "${{ github.event.inputs.build_type }}" == "debug" ]; then
             flutter build apk --debug
+            echo "✅ Debug APK built successfully"
           else
-            echo "🔨 Building RELEASE APK..."
-            flutter build apk --release --split-per-abi
+            flutter build apk --release
+            echo "✅ Release APK built successfully"
           fi
-          
-          if [ $? -ne 0 ]; then
-            echo "❌ Build failed!"
-            exit 1
-          fi
-          
-          echo "✅ Build completed successfully"
-
-      - name: Sign APK (for release builds)
-        if: inputs.build_type == 'release'
-        run: |
-          cd project/${{ steps.find_root.outputs.project_root }}
-          
-          # Generate debug keystore if not exists
-          if [ ! -f "debug.keystore" ]; then
-            echo "🔑 Generating debug keystore..."
-            keytool -genkey -v -keystore debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Debug, OU=Debug, O=Debug, L=Debug, ST=Debug, C=ID"
-          fi
-          
-          # Sign APK
-          if [ -f "build/app/outputs/apk/release/app-release.apk" ]; then
-            echo "🔑 Signing APK..."
-            jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 \
-              -keystore debug.keystore -storepass android -keypass android \
-              build/app/outputs/apk/release/app-release.apk androiddebugkey
-          elif [ -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
-            echo "🔑 Signing APK..."
-            jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 \
-              -keystore debug.keystore -storepass android -keypass android \
-              build/app/outputs/flutter-apk/app-release.apk androiddebugkey
-          fi
-
-      - name: Collect APK files
-        id: collect
-        run: |
-          cd project/${{ steps.find_root.outputs.project_root }}
-          mkdir -p apk_output
-          
-          if [ "${{ inputs.build_type }}" == "debug" ]; then
-            # Debug build
-            if [ -f "build/app/outputs/flutter-apk/app-debug.apk" ]; then
-              cp "build/app/outputs/flutter-apk/app-debug.apk" "apk_output/app-debug.apk"
-              echo "✅ Copied debug APK"
-            fi
-          else
-            # Release build - copy all APKs
-            if [ -d "build/app/outputs/apk/release" ]; then
-              find "build/app/outputs/apk/release" -name "*.apk" -exec cp {} "apk_output/" \;
-              echo "✅ Copied release APKs from apk/release/"
-            elif [ -d "build/app/outputs/flutter-apk" ]; then
-              find "build/app/outputs/flutter-apk" -name "*.apk" -exec cp {} "apk_output/" \;
-              echo "✅ Copied release APKs from flutter-apk/"
-            fi
-          fi
-          
-          echo "📁 APK files collected:"
-          ls -la apk_output/ || echo "No APK files found!"
-
-      - name: Upload APK as artifact
+      
+      # 4. Upload artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-apk-${{ inputs.tag }}
-          path: project/${{ steps.find_root.outputs.project_root }}/apk_output/
+          name: flutter-apk
+          path: project/build/app/outputs/flutter-apk/*.apk
           retention-days: 7
-          compression-level: 0
-          if-no-files-found: error
-
-      - name: Create summary
-        if: always()
+      
+      # 5. Cleanup
+      - name: Cleanup
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Detail | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Tag** | ${{ inputs.tag }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Build Type** | ${{ inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Status** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Runner** | Ubuntu Latest |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Repository** | ${{ github.repository }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-      - name: Upload error log if failed
-        if: failure()
-        run: |
-          cd project/${{ steps.find_root.outputs.project_root }}
-          if [ -f "flutter.log" ]; then
-            cp flutter.log /tmp/flutter_error.log
-          fi
-          if [ -f "build/app/outputs/flutter-apk" ]; then
-            find . -name "*.log" -exec cp {} /tmp/ \;
-          fi
-        continue-on-error: true
+          rm -rf project project.zip
+          echo "🧹 Cleanup completed"
